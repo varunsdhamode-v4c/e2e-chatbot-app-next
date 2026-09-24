@@ -33,6 +33,7 @@ import {
   isNamePart,
   joinMessagePartSegments,
 } from './databricks-message-part-transformers';
+import { parseCitationUrl } from './databricks-message-citation';
 import { MessageError } from './message-error';
 import { MessageOAuthError } from './message-oauth-error';
 import { isCredentialErrorMessage } from '@/lib/oauth-error-utils';
@@ -43,6 +44,7 @@ import {
 } from '@/lib/tool-group-segments';
 import { Streamdown } from 'streamdown';
 import { useApproval } from '@/hooks/use-approval';
+import { PdfCitationCard } from './pdf-citation-card';
 
 const PurePreviewMessage = ({
   message,
@@ -80,26 +82,42 @@ const PurePreviewMessage = ({
     (part) => part.type === 'file',
   );
 
-  // Extract non-OAuth error parts separately (OAuth errors are rendered inline)
+  // Extract non-OAuth error parts separately
   const errorParts = React.useMemo(
     () =>
       message.parts
         .filter((part) => part.type === 'data-error')
         .filter((part) => {
-          // OAuth errors are rendered inline, not in the error section
           return !isCredentialErrorMessage(part.data);
         }),
     [message.parts],
   );
 
+  // Extract source citation parts
+  const sourceParts = React.useMemo(
+    () =>
+      message.parts.filter(
+        (part) => part.type === 'source-url',
+      ) as Extract<ChatPart, { type: 'source-url' }>[],
+    [message.parts],
+  );
+
+  // Deduplicate sources by document URL + page number to prevent duplicate identical cards
+  const uniqueSources = React.useMemo(() => {
+    const map = new Map<string, Extract<ChatPart, { type: 'source-url' }>>();
+    for (const source of sourceParts) {
+      const parsed = parseCitationUrl(source.url);
+      const key = `${parsed.fileUrl}#page=${parsed.pageNumber || 1}`;
+      if (!map.has(key)) {
+        map.set(key, source);
+      }
+    }
+    return Array.from(map.values());
+  }, [sourceParts]);
+
   useDataStream();
 
   const partSegments = React.useMemo(
-    /**
-     * We segment message parts into segments that can be rendered as a single component.
-     * Used to render citations as part of the associated text.
-     * Note: OAuth errors are included here for inline rendering, non-OAuth errors are filtered out.
-     */
     () =>
       createMessagePartSegments(
         message.parts.filter(
@@ -115,12 +133,10 @@ const PurePreviewMessage = ({
     [partSegments],
   );
 
-  // Check if message only contains non-OAuth errors (no other content)
   const hasOnlyErrors = React.useMemo(() => {
     const nonErrorParts = message.parts.filter(
       (part) => part.type !== 'data-error',
     );
-    // Only consider non-OAuth errors for this check
     return errorParts.length > 0 && nonErrorParts.length === 0;
   }, [message.parts, errorParts.length]);
 
@@ -139,7 +155,6 @@ const PurePreviewMessage = ({
         {partSegments.length === 0 && errorParts.length === 0 && message.role === 'assistant' && (
           <AwaitingResponseMessage />
         )}
-
         <div
           className={cn('flex min-w-0 flex-col gap-3', {
             'w-full': message.role === 'assistant' || mode === 'edit',
@@ -167,7 +182,6 @@ const PurePreviewMessage = ({
               ))}
             </div>
           )}
-
           {renderBlocks.map((block) => {
             if (block.kind === 'tool-group') {
               return (
@@ -181,7 +195,6 @@ const PurePreviewMessage = ({
                 />
               );
             }
-
             const parts = block.parts;
             const index = block.index;
             const [part] = parts;
@@ -226,7 +239,6 @@ const PurePreviewMessage = ({
                   </div>
                 );
               }
-
               if (mode === 'edit') {
                 return (
                   <div
@@ -248,9 +260,6 @@ const PurePreviewMessage = ({
               }
             }
 
-            // dynamic-tool parts are rendered by MessageToolGroup above.
-
-            // Support for citations/annotations
             if (type === 'source-url') {
               return (
                 <a
@@ -265,7 +274,6 @@ const PurePreviewMessage = ({
               );
             }
 
-            // Render OAuth errors inline
             if (type === 'data-error' && isCredentialErrorMessage(part.data)) {
               return (
                 <MessageOAuthError
@@ -278,6 +286,24 @@ const PurePreviewMessage = ({
               );
             }
           })}
+
+          {/* PDF Citation Cards Section */}
+          {message.role === 'assistant' && uniqueSources.length > 0 && (
+            <div className="mt-2 flex w-full flex-col gap-2 border-t border-border/50 pt-3">
+              <span className="text-xs font-semibold tracking-wide text-muted-foreground/80 uppercase">
+                Source Documents
+              </span>
+              <div className="flex flex-row flex-wrap items-stretch gap-3 overflow-x-auto pb-1">
+                {uniqueSources.map((source, idx) => (
+                  <PdfCitationCard
+                    key={`source-card-${message.id}-${idx}`}
+                    url={source.url}
+                    title={source.title}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
 
           {!isReadonly && !hasOnlyErrors && (
             <MessageActions
@@ -312,24 +338,17 @@ export const PreviewMessage = memo(
   PurePreviewMessage,
   (prevProps, nextProps) => {
     if (prevProps.isLoading !== nextProps.isLoading) return false;
-    // While streaming, re-render whenever the AI SDK produces a new message
-    // object (each throttled update). We use reference equality rather than
-    // deep-equal on parts because fast-deep-equal short-circuits on identical
-    // references — and the SDK may mutate parts in place during streaming.
     if (nextProps.isLoading && prevProps.message !== nextProps.message)
       return false;
-
     if (prevProps.message.id !== nextProps.message.id) return false;
     if (prevProps.requiresScrollPadding !== nextProps.requiresScrollPadding)
       return false;
     if (!equal(prevProps.message.parts, nextProps.message.parts)) return false;
     if (prevProps.initialFeedback?.feedbackType !== nextProps.initialFeedback?.feedbackType)
       return false;
-
-    return true; // Props are equal, skip re-render
+    return true;
   },
 );
-
 
 const MessageToolGroup = ({
   tools,
@@ -380,12 +399,10 @@ const ToolPartRenderer = ({
   pendingApprovalId: string | null;
 }) => {
   const { toolCallId, input, state, errorText, output, toolName } = part;
-
   const isMcpApproval =
     part.callProviderMetadata?.databricks?.approvalRequestId != null;
   const mcpServerName =
     part.callProviderMetadata?.databricks?.mcpServerName?.toString();
-
   const approved: boolean | undefined =
     'approval' in part ? part.approval?.approved : undefined;
 
@@ -474,7 +491,6 @@ const ToolPartRenderer = ({
 
 export const AwaitingResponseMessage = () => {
   const role = 'assistant';
-
   return (
     <div
       data-testid="message-assistant-loading"

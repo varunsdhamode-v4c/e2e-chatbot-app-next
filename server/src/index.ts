@@ -19,6 +19,7 @@ import { messagesRouter } from './routes/messages';
 import { configRouter } from './routes/config';
 import { feedbackRouter } from './routes/feedback';
 import { ChatSDKError } from '@chat-template/core/errors';
+import { pdfProxyRouter } from './routes/pdf-proxy';
 
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -26,12 +27,23 @@ const __dirname = dirname(__filename);
 
 const app: Express = express();
 const isDevelopment = process.env.NODE_ENV !== 'production';
-// Either let PORT be set by env or use 3001 for development and 3000 for production
-// The CHAT_APP_PORT can be used to override the port for the chat app.
-const PORT =
-  process.env.CHAT_APP_PORT ||
-  process.env.PORT ||
-  (isDevelopment ? 3001 : 3000);
+
+// Development environment variable fallbacks for local execution
+if (isDevelopment) {
+  if (!process.env.DATABRICKS_HOST) {
+    process.env.DATABRICKS_HOST = 'https://dbc-2d78c719-5ef2.cloud.databricks.com';
+  }
+  if (!process.env.DATABRICKS_CONFIG_PROFILE) {
+    process.env.DATABRICKS_CONFIG_PROFILE = 'agent-dev';
+  }
+  if (!process.env.DATABRICKS_SERVING_ENDPOINT) {
+    process.env.DATABRICKS_SERVING_ENDPOINT = 'ka-bd75d20a-endpoint';
+  }
+}
+
+// Dynamic Port Handling: Databricks Apps assigns process.env.PORT at runtime (e.g. 8080)
+// For local development, default to 3001 to prevent collisions with Vite (3000)
+const PORT = process.env.PORT || process.env.CHAT_APP_PORT || (isDevelopment ? 3001 : 3000);
 
 // CORS configuration
 app.use(
@@ -45,7 +57,10 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Health check endpoint (for Playwright tests)
+// Register PDF Proxy Endpoint
+app.use(pdfProxyRouter);
+
+// Health check endpoint (for Playwright tests & Databricks App container checks)
 app.get('/ping', (_req, res) => {
   res.status(200).send('pong');
 });
@@ -103,7 +118,7 @@ if (agentBackendUrl) {
   });
 }
 
-// Serve static files in production
+// Serve static files in production (Databricks Apps Deployment)
 if (!isDevelopment) {
   const clientBuildPath = path.join(__dirname, '../../client/dist');
   app.use(express.static(clientBuildPath));
@@ -129,12 +144,12 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   });
 });
 
-// Start MSW mock server in test mode
+// Start MSW mock server in test mode or start backend server
 async function startServer() {
   if (process.env.PLAYWRIGHT === 'True') {
     console.log('[Test Mode] Starting MSW mock server for API mocking...');
     try {
-      // Dynamically import MSW setup from tests directory (using relative path from server root)
+      // Dynamically import MSW setup from tests directory
       const modulePath = path.join(
         dirname(dirname(__dirname)),
         'tests',
@@ -174,7 +189,7 @@ async function startServer() {
         getLastServingRequestHeaders,
       } = await import(handlersPath);
 
-      // Test-only endpoint to get captured requests (for context injection testing)
+      // Test-only endpoint to get captured requests
       app.get('/api/test/captured-requests', (_req, res) => {
         res.json(getCapturedRequests());
       });
@@ -217,8 +232,6 @@ async function startServer() {
       );
     }
 
-    // Registered outside the MSW try/catch so it's available even if MSW setup fails.
-    // Lets tests simulate a message from an endpoint that doesn't return traces.
     app.post('/api/test/store-message-meta', (req, res) => {
       const { messageId, chatId, traceId } = req.body as {
         messageId: string;
@@ -230,8 +243,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, () => {
-    console.log(`Backend server is running on http://localhost:${PORT}`);
+  app.listen(Number(PORT), '0.0.0.0', () => {
+    console.log(`[Server] Listening on http://0.0.0.0:${PORT}`);
     console.log(`Environment: ${isDevelopment ? 'development' : 'production'}`);
   });
 }

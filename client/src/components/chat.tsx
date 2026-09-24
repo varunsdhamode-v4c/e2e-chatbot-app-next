@@ -26,6 +26,7 @@ import type { ClientSession } from '@chat-template/auth';
 import { softNavigateToChatId } from '@/lib/navigation';
 import { useAppConfig } from '@/contexts/AppConfigContext';
 import { Greeting } from './greeting';
+import { PdfPreviewDrawer, type CitationPreviewData } from './pdf-preview-drawer';
 
 export function Chat({
   id,
@@ -61,11 +62,25 @@ export function Chat({
     initialLastContext,
   );
 
+  const [previewCitation, setPreviewCitation] = useState<CitationPreviewData | null>(null);
+
+  useEffect(() => {
+    const handleOpenPdf = (e: Event) => {
+      const customEvent = e as CustomEvent<CitationPreviewData>;
+      if (customEvent.detail) {
+        setPreviewCitation(customEvent.detail);
+      }
+    };
+    window.addEventListener('open-pdf-citation', handleOpenPdf);
+    return () => {
+      window.removeEventListener('open-pdf-citation', handleOpenPdf);
+    };
+  }, []);
+
   const [lastPart, setLastPart] = useState<UIMessageChunk | undefined>();
   const lastPartRef = useRef<UIMessageChunk | undefined>(lastPart);
   lastPartRef.current = lastPart;
 
-  // Single counter for resume attempts - reset when stream parts are received
   const resumeAttemptCountRef = useRef(0);
   const maxResumeAttempts = 3;
 
@@ -78,7 +93,6 @@ export function Chat({
 
   const fetchWithAbort = useMemo(() => {
     return async (input: RequestInfo | URL, init?: RequestInit) => {
-      // useChat does not cancel /stream requests when the component is unmounted
       const signal = abortController.current?.signal;
       return fetchWithErrorHandlers(input, { ...init, signal });
     };
@@ -94,8 +108,6 @@ export function Chat({
     mutate(unstable_serialize(getChatHistoryPaginationKey));
   }, [mutate]);
 
-  // For new chats, the title arrives via a `data-title` stream part
-  // once backend title generation completes — no separate fetch needed.
   const [streamTitle, setStreamTitle] = useState<string | undefined>();
   const [titlePending, setTitlePending] = useState(false);
   const displayTitle = title ?? streamTitle;
@@ -114,7 +126,7 @@ export function Chat({
     messages: initialMessages,
     experimental_throttle: 100,
     generateId: generateUUID,
-    resume: id !== undefined && initialMessages.length > 0, // Enable automatic stream resumption
+    resume: id !== undefined && initialMessages.length > 0,
     transport: new ChatTransport({
       onStreamPart: (part) => {
         if (isNewChat && !didFetchHistoryOnNewChat.current) {
@@ -124,7 +136,6 @@ export function Chat({
           }
           didFetchHistoryOnNewChat.current = true;
         }
-        // Reset resume attempts when we successfully receive stream parts
         resumeAttemptCountRef.current = 0;
         setLastPart(part);
       },
@@ -134,23 +145,15 @@ export function Chat({
         const lastMessage = messages.at(-1);
         const isUserMessage = lastMessage?.role === 'user';
 
-        // For continuations (non-user messages like tool results), we must always
-        // send previousMessages because the tool result only exists client-side
-        // and hasn't been saved to the database yet.
         const needsPreviousMessages = !chatHistoryEnabled || !isUserMessage;
 
         return {
           body: {
             id,
-            // Only include message field for user messages (new messages)
-            // For continuation (assistant messages with tool results), omit message field
             ...(isUserMessage ? { message: lastMessage } : {}),
             selectedChatModel: initialChatModel,
             selectedVisibilityType: visibilityType,
             nextMessageId: generateUUID(),
-            // Send previous messages when:
-            // 1. Database is disabled (ephemeral mode) - always need client-side messages
-            // 2. Continuation request (tool results) - tool result only exists client-side
             ...(needsPreviousMessages
               ? {
                   previousMessages: isUserMessage
@@ -191,15 +194,12 @@ export function Chat({
       didFetchHistoryOnNewChat.current = false;
       setTitlePending(false);
 
-      // If user aborted, don't try to resume
       if (isAbort) {
         console.log('[Chat onFinish] Stream was aborted by user, not resuming');
         fetchChatHistory();
         return;
       }
 
-      // Check if the last message contains an OAuth credential error
-      // If so, don't try to resume - the user needs to authenticate first
       const lastMessage = finishedMessages?.at(-1);
       const hasOAuthError = lastMessage?.parts?.some(
         (part) =>
@@ -217,10 +217,6 @@ export function Chat({
         return;
       }
 
-      // Determine if we should attempt to resume:
-      // 1. Stream didn't end with a 'finish' part (incomplete)
-      // 2. It was a disconnect/error that terminated the stream
-      // 3. We haven't exceeded max resume attempts
       const streamIncomplete = lastPartRef.current?.type !== 'finish';
       const shouldResume =
         streamIncomplete &&
@@ -232,12 +228,10 @@ export function Chat({
           resumeAttemptCountRef.current + 1,
         );
         resumeAttemptCountRef.current++;
-        // Ref: https://github.com/vercel/ai/issues/8477#issuecomment-3603209884
         queueMicrotask(() => {
           resumeStream();
-        })
+        });
       } else {
-        // Stream completed normally or we've exhausted resume attempts
         if (resumeAttemptCountRef.current >= maxResumeAttempts) {
           console.warn('[Chat onFinish] Max resume attempts reached');
         }
@@ -247,21 +241,14 @@ export function Chat({
     onError: (error) => {
       console.log('[Chat onError] Error occurred:', error);
 
-      // Only show toast for explicit ChatSDKError (backend validation errors)
-      // Other errors (network, schema validation) are handled silently or in message parts
       if (error instanceof ChatSDKError) {
         toast({
           type: 'error',
           description: error.message,
         });
       } else {
-        // Non-ChatSDKError: Could be network error or in-stream error
-        // Log but don't toast - errors during streaming may be informational
         console.warn('[Chat onError] Error during streaming:', error.message);
       }
-      // Note: We don't call resumeStream here because onError can be called
-      // while the stream is still active (e.g., for data-error parts).
-      // Resume logic is handled exclusively in onFinish.
     },
   });
 
@@ -284,19 +271,21 @@ export function Chat({
 
   const [attachments, setAttachments] = useState<Array<Attachment>>([]);
 
-  const inputElement = <MultimodalInput
-    chatId={id}
-    input={input}
-    setInput={setInput}
-    status={status}
-    stop={stop}
-    attachments={attachments}
-    setAttachments={setAttachments}
-    messages={messages}
-    setMessages={setMessages}
-    sendMessage={sendMessage}
-    selectedVisibilityType={visibilityType}
-  />
+  const inputElement = (
+    <MultimodalInput
+      chatId={id}
+      input={input}
+      setInput={setInput}
+      status={status}
+      stop={stop}
+      attachments={attachments}
+      setAttachments={setAttachments}
+      messages={messages}
+      setMessages={setMessages}
+      sendMessage={sendMessage}
+      selectedVisibilityType={visibilityType}
+    />
+  );
 
   if (messages.length === 0) {
     return (
@@ -329,14 +318,15 @@ export function Chat({
           feedback={feedback}
         />
 
-
-
         <div className="sticky bottom-0 z-1 mx-auto flex w-full max-w-4xl gap-2 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
-          {!isReadonly && (
-            inputElement
-          )}
+          {!isReadonly && inputElement}
         </div>
       </div>
+
+      <PdfPreviewDrawer
+        citation={previewCitation}
+        onClose={() => setPreviewCitation(null)}
+      />
     </>
   );
 }

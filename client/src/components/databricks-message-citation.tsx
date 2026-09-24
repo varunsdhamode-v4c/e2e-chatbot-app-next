@@ -2,10 +2,65 @@ import type { ChatMessage } from '@chat-template/core';
 import type {
   AnchorHTMLAttributes,
   ComponentType,
+  MouseEvent,
   PropsWithChildren,
 } from 'react';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { cn } from '@/lib/utils';
+import type { CitationPreviewData } from './pdf-preview-drawer';
+
+/**
+ * Parses Databricks volume / SharePoint citation links to extract:
+ * Clean base file URL (stripping hash)
+ * File display name
+ * Target page number from #page=X
+ * Target text snippet from :~:text=...
+ */
+export function parseCitationUrl(fullUrl: string): CitationPreviewData {
+  try {
+    // Sanitize any spaces inside the URL before constructing URL object
+    const normalizedUrl = fullUrl.replace(/ /g, '%20');
+    const url = new URL(normalizedUrl);
+    const hash = url.hash;
+
+    // Remove hash from download URL to fetch raw PDF binary
+    url.hash = '';
+    const fileUrl = url.toString();
+
+    const pathnameParts = url.pathname.split('/');
+    const rawFileName = pathnameParts[pathnameParts.length - 1] || 'Document.pdf';
+    const fileName = decodeURIComponent(rawFileName);
+
+    let pageNumber: number | undefined;
+    let highlightText: string | undefined;
+
+    if (hash) {
+      const pageMatch = hash.match(/page=(\d+)/);
+      if (pageMatch) {
+        pageNumber = parseInt(pageMatch[1], 10);
+      }
+
+      const textMatch = hash.match(/:~:text=(.+)/);
+      if (textMatch) {
+        let rawText = textMatch[1];
+        // Handle custom Databricks / Agent Bricks encoding markers
+        rawText = rawText.replace(/%@A/g, ' ').replace(/%2@/g, ' ');
+        try {
+          highlightText = decodeURIComponent(rawText);
+        } catch {
+          highlightText = rawText;
+        }
+      }
+    }
+
+    return { fileUrl, fileName, pageNumber, highlightText };
+  } catch {
+    return {
+      fileUrl: fullUrl,
+      fileName: 'Document.pdf',
+    };
+  }
+}
 
 /**
  * ReactMarkdown/Streamdown component that handles Databricks message citations.
@@ -27,8 +82,6 @@ export const DatabricksMessageCitationStreamdownIntegration: ComponentType<
   return <DefaultAnchor {...props} />;
 };
 
-// const isFootnoteLink
-
 type SourcePart = Extract<ChatMessage['parts'][number], { type: 'source-url' }>;
 
 // Adds a unique suffix to the link to indicate that it is a Databricks message citation.
@@ -49,35 +102,45 @@ const isDatabricksMessageCitationLink = (
 ): link is `${string}::databricks_citation` =>
   link?.endsWith('::databricks_citation') ?? false;
 
-// Renders the Databricks message citation.
+// Renders the Databricks message citation with in-app preview click interceptor.
 const DatabricksMessageCitationRenderer = (
   props: PropsWithChildren<{
     href: string;
   }>,
 ) => {
+  const citationData = parseCitationUrl(props.href);
+
+  const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    window.dispatchEvent(
+      new CustomEvent('open-pdf-citation', {
+        detail: citationData,
+      }),
+    );
+  };
+
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <DefaultAnchor
+        <a
           href={props.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="rounded-md bg-muted-foreground px-2 py-0 text-zinc-200"
+          onClick={handleClick}
+          className="wrap-anywhere font-medium text-primary underline cursor-pointer"
         >
           {props.children}
-        </DefaultAnchor>
+        </a>
       </TooltipTrigger>
       <TooltipContent
         style={{ maxWidth: '300px', padding: '8px', wordWrap: 'break-word' }}
       >
-        {props.href}
+        Preview {citationData.fileName}
+        {citationData.pageNumber ? ` (Page ${citationData.pageNumber})` : ''}
       </TooltipContent>
     </Tooltip>
   );
 };
 
-// Copied from streamdown
-// https://github.com/vercel/streamdown/blob/dc5bd12e5709afce09814e47cf80884f8c665b3d/packages/streamdown/lib/components.tsx#L157-L181
+// Default Anchor fallback
 const DefaultAnchor: ComponentType<AnchorHTMLAttributes<HTMLAnchorElement>> = (
   props,
 ) => {
