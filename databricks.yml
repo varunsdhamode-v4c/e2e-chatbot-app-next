@@ -20,6 +20,10 @@ resources:
       name: knowledge-agent-${var.resource_name_suffix}
       description: "AI-powered chatbot application with PDF preview"
       source_code_path: .
+
+      user_api_scopes:
+        - model-serving
+
       resources:
         - name: serving-endpoint
           serving_endpoint:

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getDatabricksToken, getCachedCliHost } from '@chat-template/auth';
 import { getHostUrl } from '@chat-template/utils';
+import path from 'node:path';
 
 export const pdfProxyRouter = Router();
 
@@ -11,38 +12,48 @@ pdfProxyRouter.get('/api/pdf-proxy', async (req, res) => {
       return res.status(400).send('Missing url parameter');
     }
 
-    // 1. Parse URL and extract the /Volumes/... path
-    const urlObj = new URL(rawUrl);
+    // 1. Extract /Volumes/... path from input URL
+    const urlObj = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
     const pathname = urlObj.pathname;
-
     const volumesIdx = pathname.indexOf('/Volumes/');
     const filePath = volumesIdx !== -1 ? pathname.substring(volumesIdx) : pathname;
 
-    // 2. Build standard Unity Catalog Files REST API path (/api/2.0/fs/files/Volumes/...)
+    // Extract file name and extension
+    const rawFileName = path.basename(filePath) || 'document';
+    const fileName = decodeURIComponent(rawFileName);
+    const ext = path.extname(fileName).toLowerCase();
+
+    // 2. Build Databricks Files REST API endpoint
     const apiPath = `/api/2.0/fs/files${filePath}`;
 
-    // 3. Resolve active workspace host:
-    // Priority 1: Environment variable injected by Databricks Apps
-    // Priority 2: Local CLI cached host or fallback host URL
-    const activeHost = process.env.DATABRICKS_HOST || getCachedCliHost() || getHostUrl();
-    const targetUrl = `${activeHost.replace(/\/$/, '')}${apiPath}`;
+    // 3. Resolve host and ensure protocol prefix (https://)
+    let activeHost = process.env.DATABRICKS_HOST || getCachedCliHost() || getHostUrl() || '';
+    activeHost = activeHost.replace(/\/$/, '');
 
-    console.log('[PDF Proxy] Requesting file from:', targetUrl);
+    if (activeHost && !activeHost.startsWith('http://') && !activeHost.startsWith('https://')) {
+      activeHost = `https://${activeHost}`;
+    }
 
-    // 4. Resolve authentication token:
-    // Priority 1: Token forwarded in headers by Databricks Apps (x-forwarded-access-token / Authorization)
-    // Priority 2: Token from environment variable (DATABRICKS_TOKEN)
-    // Priority 3: Local CLI OAuth token fallback
-    let token =
-      (req.headers['x-forwarded-access-token'] as string) ||
-      req.headers['authorization']?.replace(/^Bearer\s+/i, '') ||
-      process.env.DATABRICKS_TOKEN;
+    const targetUrl = `${activeHost}${apiPath}`;
+    console.log(`[PDF Proxy] Requesting file from: ${targetUrl}`);
+
+    // 4. Resolve authentication token
+    // Prioritize DATABRICKS_TOKEN (Service Principal) over x-forwarded-access-token
+    let token = process.env.DATABRICKS_TOKEN;
 
     if (!token) {
       token = await getDatabricksToken();
     }
 
-    // 5. Fetch PDF binary from Databricks API
+    if (!token && req.headers['authorization']) {
+      token = req.headers['authorization'].replace(/^Bearer\s+/i, '');
+    }
+
+    if (!token && req.headers['x-forwarded-access-token']) {
+      token = req.headers['x-forwarded-access-token'] as string;
+    }
+
+    // 5. Fetch file binary from Databricks API
     const response = await fetch(targetUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -56,16 +67,29 @@ pdfProxyRouter.get('/api/pdf-proxy', async (req, res) => {
     }
 
     const arrayBuffer = await response.arrayBuffer();
-    const pdfBuffer = Buffer.from(arrayBuffer);
+    const buffer = Buffer.from(arrayBuffer);
 
-    // 6. Return inline PDF stream
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="document.pdf"');
-    res.setHeader('Content-Length', pdfBuffer.length.toString());
+    // 6. Set appropriate MIME content type
+    let contentType = response.headers.get('content-type') || '';
+    if (!contentType || contentType.includes('application/octet-stream') || contentType.includes('text/plain')) {
+      if (ext === '.docx') {
+        contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      } else if (ext === '.pdf') {
+        contentType = 'application/pdf';
+      } else if (ext === '.pptx' || ext === '.ppt') {
+        contentType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+      } else {
+        contentType = 'application/octet-stream';
+      }
+    }
 
-    return res.send(pdfBuffer);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Content-Length', buffer.length.toString());
+    return res.send(buffer);
   } catch (error) {
     console.error('[PDF Proxy Exception]:', error);
-    return res.status(500).send('Error proxying PDF document');
+    return res.status(500).send('Error proxying document');
   }
 });

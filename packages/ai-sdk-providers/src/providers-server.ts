@@ -244,42 +244,37 @@ async function getOrCreateDatabricksProvider(): Promise<CachedProvider> {
   await getProviderToken();
   const hostname = await getWorkspaceHostname();
 
-  // Create provider with fetch that always uses fresh token
-  const provider = createDatabricksProvider({
-    // When using endpoints such as Agent Bricks or custom agents, we need to use remote tool calling to handle the tool calls
-    useRemoteToolCalling: true,
-    baseURL: `${hostname}/serving-endpoints`,
-    formatUrl: ({ baseUrl, path }) => API_PROXY ?? `${baseUrl}${path}`,
-    fetch: async (...[input, init]: Parameters<typeof fetch>) => {
-      const headers = new Headers(init?.headers);
+  // Create provider with fetch that always uses the app service-principal token
+const provider = createDatabricksProvider({
+  // Use remote tool calling for Agent Bricks or custom agents
+  useRemoteToolCalling: true,
+  baseURL: `${hostname}/serving-endpoints`,
+  formatUrl: ({ baseUrl, path }) => API_PROXY ?? `${baseUrl}${path}`,
 
-      // If the user's OBO token is present, use it for Authorization so the
-      // endpoint sees the user's identity. Keep the header around so
-      // downstream agent apps can also read it directly.
-      const userToken = headers.get('x-forwarded-access-token');
-      if (userToken) {
-        headers.set('Authorization', `Bearer ${userToken}`);
-      } else {
-        const currentToken = await getProviderToken();
-        headers.set('Authorization', `Bearer ${currentToken}`);
-      }
+  fetch: async (...[input, init]: Parameters<typeof fetch>) => {
+    const headers = new Headers(init?.headers);
 
-      if (API_PROXY) {
-        headers.set('x-mlflow-return-trace-id', 'true');
-      }
+    // Use the Databricks App service-principal token instead of the user's
+    // forwarded OAuth token, which may not include the model-serving scope.
+    const currentToken = await getProviderToken();
+    headers.delete('x-forwarded-access-token');
+    headers.set('Authorization', `Bearer ${currentToken}`);
 
-      return databricksFetch(input, {
-        ...init,
-        headers,
-      });
-    },
-  });
+    if (API_PROXY) {
+      headers.set('x-mlflow-return-trace-id', 'true');
+    }
 
-  oauthProviderCache = provider;
-  oauthProviderCacheTime = Date.now();
-  return provider;
+    return databricksFetch(input, {
+      ...init,
+      headers,
+    });
+  },
+});
+
+oauthProviderCache = provider;
+oauthProviderCacheTime = Date.now();
+return provider;
 }
-
 // Response type for serving endpoint details
 interface EndpointDetailsResponse {
   task: string | undefined;

@@ -2,7 +2,7 @@ import { a as message, c as desc, d as gt, f as gte, h as sql, i as chat, l as a
 import { r as getHostUrl } from "./src-BaHhVWSg.mjs";
 import { i as getCachedCliHost, n as getAuthMethodDescription, o as getDatabricksToken, r as getAuthSession, t as getAuthMethod } from "./src-BCvn6ijd.mjs";
 import { t as src_default$1 } from "./src-CdTKJz_q.mjs";
-import { n as CONTEXT_HEADER_USER_ID, o as getEndpointOboInfo, s as getWorkspaceHostname, t as CONTEXT_HEADER_CONVERSATION_ID } from "./src-CBLFQ6VE.mjs";
+import { n as CONTEXT_HEADER_USER_ID, o as getEndpointOboInfo, s as getWorkspaceHostname, t as CONTEXT_HEADER_CONVERSATION_ID } from "./src-DIMFuCQP.mjs";
 import dotenv from "dotenv";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -870,7 +870,7 @@ const postRequestBodySchema = z.object({
 //#endregion
 //#region ../packages/core/src/ai/providers.ts
 async function getServerProvider() {
-	const { getDatabricksServerProvider } = await import("./src-7-Ju5Ohs.mjs");
+	const { getDatabricksServerProvider } = await import("./src-W3x92AxZ.mjs");
 	return getDatabricksServerProvider();
 }
 let cachedServerProvider = null;
@@ -1787,13 +1787,22 @@ pdfProxyRouter.get("/api/pdf-proxy", async (req, res) => {
 	try {
 		const rawUrl = req.query.url;
 		if (!rawUrl) return res.status(400).send("Missing url parameter");
-		const pathname = new URL(rawUrl).pathname;
+		const pathname = new URL(rawUrl.startsWith("http") ? rawUrl : `https://${rawUrl}`).pathname;
 		const volumesIdx = pathname.indexOf("/Volumes/");
-		const apiPath = `/api/2.0/fs/files${volumesIdx !== -1 ? pathname.substring(volumesIdx) : pathname}`;
-		const targetUrl = `${(process.env.DATABRICKS_HOST || getCachedCliHost() || getHostUrl()).replace(/\/$/, "")}${apiPath}`;
-		console.log("[PDF Proxy] Requesting file from:", targetUrl);
-		let token = req.headers["x-forwarded-access-token"] || req.headers["authorization"]?.replace(/^Bearer\s+/i, "") || process.env.DATABRICKS_TOKEN;
+		const filePath = volumesIdx !== -1 ? pathname.substring(volumesIdx) : pathname;
+		const rawFileName = path.basename(filePath) || "document";
+		const fileName = decodeURIComponent(rawFileName);
+		const ext = path.extname(fileName).toLowerCase();
+		const apiPath = `/api/2.0/fs/files${filePath}`;
+		let activeHost = process.env.DATABRICKS_HOST || getCachedCliHost() || getHostUrl() || "";
+		activeHost = activeHost.replace(/\/$/, "");
+		if (activeHost && !activeHost.startsWith("http://") && !activeHost.startsWith("https://")) activeHost = `https://${activeHost}`;
+		const targetUrl = `${activeHost}${apiPath}`;
+		console.log(`[PDF Proxy] Requesting file from: ${targetUrl}`);
+		let token = process.env.DATABRICKS_TOKEN;
 		if (!token) token = await getDatabricksToken();
+		if (!token && req.headers["authorization"]) token = req.headers["authorization"].replace(/^Bearer\s+/i, "");
+		if (!token && req.headers["x-forwarded-access-token"]) token = req.headers["x-forwarded-access-token"];
 		const response = await fetch(targetUrl, { headers: { Authorization: `Bearer ${token}` } });
 		if (!response.ok) {
 			const errorText = await response.text();
@@ -1801,14 +1810,20 @@ pdfProxyRouter.get("/api/pdf-proxy", async (req, res) => {
 			return res.status(response.status).send(`Databricks Error: ${response.statusText}`);
 		}
 		const arrayBuffer = await response.arrayBuffer();
-		const pdfBuffer = Buffer.from(arrayBuffer);
-		res.setHeader("Content-Type", "application/pdf");
-		res.setHeader("Content-Disposition", "inline; filename=\"document.pdf\"");
-		res.setHeader("Content-Length", pdfBuffer.length.toString());
-		return res.send(pdfBuffer);
+		const buffer = Buffer.from(arrayBuffer);
+		let contentType = response.headers.get("content-type") || "";
+		if (!contentType || contentType.includes("application/octet-stream") || contentType.includes("text/plain")) if (ext === ".docx") contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+		else if (ext === ".pdf") contentType = "application/pdf";
+		else if (ext === ".pptx" || ext === ".ppt") contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+		else contentType = "application/octet-stream";
+		res.setHeader("Content-Type", contentType);
+		res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+		res.setHeader("Cache-Control", "public, max-age=86400");
+		res.setHeader("Content-Length", buffer.length.toString());
+		return res.send(buffer);
 	} catch (error) {
 		console.error("[PDF Proxy Exception]:", error);
-		return res.status(500).send("Error proxying PDF document");
+		return res.status(500).send("Error proxying document");
 	}
 });
 

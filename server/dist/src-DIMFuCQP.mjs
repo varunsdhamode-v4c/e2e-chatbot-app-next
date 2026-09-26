@@ -3885,12 +3885,9 @@ async function getOrCreateDatabricksProvider() {
 		formatUrl: ({ baseUrl, path }) => API_PROXY ?? `${baseUrl}${path}`,
 		fetch: async (...[input, init]) => {
 			const headers = new Headers(init?.headers);
-			const userToken = headers.get("x-forwarded-access-token");
-			if (userToken) headers.set("Authorization", `Bearer ${userToken}`);
-			else {
-				const currentToken = await getProviderToken();
-				headers.set("Authorization", `Bearer ${currentToken}`);
-			}
+			const currentToken = await getProviderToken();
+			headers.delete("x-forwarded-access-token");
+			headers.set("Authorization", `Bearer ${currentToken}`);
 			if (API_PROXY) headers.set("x-mlflow-return-trace-id", "true");
 			return databricksFetch(input, {
 				...init,
