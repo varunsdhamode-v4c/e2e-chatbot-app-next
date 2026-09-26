@@ -3,11 +3,13 @@ bundle:
 
 variables:
   serving_endpoint_name:
-    description: "Name of the model serving endpoint to be used by the app"
+    description: "Name of the model serving endpoint used by the app"
     default: "ka-bd75d20a-endpoint"
+
   pdf_volume_name:
-    description: "Full Unity Catalog path to the PDF Volume"
+    description: "Full Unity Catalog path to the PDF volume"
     default: "poc.agent_files.all_files"
+
   resource_name_suffix:
     description: "Suffix for resource names"
     default: "dev"
@@ -16,13 +18,14 @@ resources:
   apps:
     knowledge_agent_app:
       name: knowledge-agent-${var.resource_name_suffix}
-      description: "AI-powered chatbot application with PDF Preview"
+      description: "AI-powered chatbot application with PDF preview"
       source_code_path: .
       resources:
         - name: serving-endpoint
           serving_endpoint:
             name: ${var.serving_endpoint_name}
             permission: CAN_QUERY
+
         - name: pdf-volume
           uc_securable:
             securable_full_name: ${var.pdf_volume_name}

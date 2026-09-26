@@ -5,6 +5,7 @@ command:
 
 env:
   - name: "DATABRICKS_SERVING_ENDPOINT"
-    value: "ka-bd75d20a-endpoint"
+    valueFrom: "serving-endpoint"
+
   - name: "NODE_ENV"
     value: "production"
