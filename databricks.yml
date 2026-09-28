@@ -10,11 +10,24 @@ variables:
     description: "Full Unity Catalog path to the PDF volume"
     default: "poc.agent_files.all_files"
 
+  # ADDED: Base name for Lakebase Postgres Instance
+  database_instance_name:
+    description: "Base name of the Lakebase database instance"
+    default: "chatbot-lakebase"
+
   resource_name_suffix:
     description: "Suffix for resource names"
     default: "dev"
 
 resources:
+  # =========================================================================
+  # ADDED: Top-level Database Instance definition for Chat History
+  # =========================================================================
+  database_instances:
+    chatbot_lakebase:
+      name: ${var.database_instance_name}-${var.resource_name_suffix}
+      capacity: CU_1
+
   apps:
     knowledge_agent_app:
       name: knowledge-agent-${var.resource_name_suffix}
@@ -35,6 +48,26 @@ resources:
             securable_full_name: ${var.pdf_volume_name}
             securable_type: VOLUME
             permission: READ_VOLUME
+
+        # =========================================================================
+        # ADDED: App Binding to Lakebase Database for Chat History
+        # =========================================================================
+        - name: database
+          description: "Lakebase database instance for persistent chat history"
+          database:
+            database_name: databricks_postgres
+            instance_name: ${resources.database_instances.chatbot_lakebase.name}
+            permission: CAN_CONNECT_AND_CREATE
+
+        # =========================================================================
+        # ADDED: MLflow Experiment Binding for Feedback Widget
+        # Replace 'YOUR_MLFLOW_EXPERIMENT_ID' with your actual experiment ID
+        # =========================================================================
+        - name: experiment
+          description: "MLflow experiment for collecting user feedback"
+          experiment:
+            experiment_id: "3343778833451525"
+            permission: CAN_EDIT
 
 targets:
   dev:
